@@ -166,8 +166,7 @@ local EspGunDropEnabled = false
 local Flags = { EspSheriff = false, EspMurder = false, EspInnocent = false }
 
 local IsFetching = false
-local PlayerButtonsMap = {}
-local SectionConnections = {}
+local PlayerSectionsMap = {}
 local FlingingActive = false
 
 -- Вспомогательная функция извлечения чистых значений из элементов WindUI
@@ -333,6 +332,7 @@ end)
 GameplayFolder:WaitForChild("RoundEndFade").OnClientEvent:Connect(function() ClearRoundData() end)
 GameplayFolder:WaitForChild("VictoryScreen").OnClientEvent:Connect(function() ClearRoundData() end)
 
+-- ИСПРАВЛЕННОЕ ОПРЕДЕЛЕНИЕ РОЛИ (ПОДХВАТЫВАЕТ ВСЕХ ПОДОБРАВШИХ В ТЕЧЕНИЕ РАУНДА)
 local function GetPlayerRole(player)
 	if not player or not player.Parent then return "Lobby" end
 	if DeadPlayersThisRound[player.Name] then return "Lobby" end
@@ -346,15 +346,19 @@ local function GetPlayerRole(player)
 		end
 	end
 
-	local serverRole = ServerLogRoles[player.Name]
-
+	-- Прямой чекинг инвентаря на ходу
 	if HasKnife(player) then return "Murderer" end
-	if HasGun(player) then 
-		if serverRole == "Innocent" then return "Hero" end
-		return "Sheriff" 
+	if HasGun(player) then
+		local initialRole = ServerLogRoles[player.Name]
+		if initialRole == "Sheriff" then
+			return "Sheriff"
+		else
+			return "Hero" -- Любой кто подобрал пест кроме исходного Шерифа получает статус Героя (Фиолетовый)
+		end
 	end
 
-	if serverRole then return serverRole end
+	local serverRole = ServerLogRoles[player.Name]
+	if serverRole and serverRole ~= "Sheriff" then return serverRole end
 	if not RoundActive or IsInLobbyZone(player) then return "Lobby" end
 	return "Innocent"
 end
@@ -461,10 +465,7 @@ WorldTab:Button({
 	end
 })
 
--- // =============================================================================
--- // ВКЛАДКА LOCAL PLAYER (ПЕРЕМЕЩЕНИЕ И ФИЗИКА - FIXED WITH NEW SLIDER SYNTAX)
--- // =============================================================================
-
+-- // ВКЛАДКА LOCAL PLAYER
 local LocalPlayerTab = PlayersSection:Tab({ Title = "Local Player", Icon = "solar:user-bold", IconColor = RoseIconColor, Border = true })
 
 local LPVars = {
@@ -478,7 +479,6 @@ local LPVars = {
 	FlyBodyGyro = nil
 }
 
--- Функция безопасной очистки физических объектов полета
 local function StopFlying()
 	if LPVars.FlyBodyVelocity then
 		LPVars.FlyBodyVelocity:Destroy()
@@ -495,7 +495,6 @@ local function StopFlying()
 	end
 end
 
--- WalkSpeed Toggle & Slider
 LocalPlayerTab:Toggle({
 	Title = "Enable WalkSpeed",
 	Value = false,
@@ -504,7 +503,7 @@ LocalPlayerTab:Toggle({
 		local char = LocalPlayer.Character
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		if hum and not LPVars.SpeedEnabled then
-			hum.WalkSpeed = 16 -- Сброс к стандартной скорости при выключении
+			hum.WalkSpeed = 16
 		end
 	end
 })
@@ -529,7 +528,6 @@ LocalPlayerTab:Slider({
 	end
 })
 
--- Fly Toggle & Slider
 LocalPlayerTab:Toggle({
 	Title = "Enable Fly",
 	Value = false,
@@ -557,7 +555,6 @@ LocalPlayerTab:Slider({
 	end
 })
 
--- Noclip & Inf Jump
 LocalPlayerTab:Toggle({
 	Title = "Enable Noclip",
 	Value = false,
@@ -574,7 +571,6 @@ LocalPlayerTab:Toggle({
 	end
 })
 
--- Исправленный игровой цикл перемещения (без блокировки физики)
 RunService.Heartbeat:Connect(function(deltaTime)
 	local char = LocalPlayer.Character
 	if not char then return end
@@ -583,7 +579,6 @@ RunService.Heartbeat:Connect(function(deltaTime)
 	local hrp = char:FindFirstChild("HumanoidRootPart")
 	if not hum or not hrp then return end
 
-	-- Безопасный метод ускорения через CFrame (обходит античит заморозку MM2)
 	if LPVars.SpeedEnabled == true and hum.MoveDirection.Magnitude > 0 then
 		local extraSpeed = (LPVars.WalkSpeed - 16)
 		if extraSpeed > 0 then
@@ -591,7 +586,6 @@ RunService.Heartbeat:Connect(function(deltaTime)
 		end
 	end
 
-	-- Логика полета без залипания BodyVelocity
 	if LPVars.FlyEnabled == true then
 		hum.PlatformStand = true
 		local cam = Workspace.CurrentCamera
@@ -615,7 +609,6 @@ RunService.Heartbeat:Connect(function(deltaTime)
 				dir = dir.Unit
 				LPVars.FlyBodyVelocity.Velocity = dir * LPVars.FlySpeed
 			else
-				-- Когда клавиши не нажаты, обнуляем силу, чтобы не замораживать персонажа
 				LPVars.FlyBodyVelocity.Velocity = Vector3.new(0, 0, 0)
 			end
 		end
@@ -626,7 +619,6 @@ RunService.Heartbeat:Connect(function(deltaTime)
 	end
 end)
 
--- Логика Noclip
 RunService.Stepped:Connect(function()
 	if LPVars.NoclipEnabled == true and LocalPlayer.Character then
 		for _, part in ipairs(LocalPlayer.Character:GetDescendants()) do
@@ -637,7 +629,6 @@ RunService.Stepped:Connect(function()
 	end
 end)
 
--- Логика Infinite Jump
 UserInputService.JumpRequest:Connect(function()
 	if LPVars.InfJumpEnabled == true and LocalPlayer.Character then
 		local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
@@ -647,7 +638,7 @@ UserInputService.JumpRequest:Connect(function()
 	end
 end)
 
--- Логика SkidFling
+-- SkidFling
 local function SkidFlingPlayer(TargetPlayer)
     if FlingingActive then return end
     
@@ -765,52 +756,66 @@ local function SkidFlingPlayer(TargetPlayer)
     end
 end
 
--- Управление игроками (Вкладка Players)
+-- // =============================================================================
+-- // УПРАВЛЕНИЕ ИГРОКАМИ (РЕАЛЬНОЕ ВРЕМЯ ОБНОВЛЕНИЯ СПИСКА)
+-- // =============================================================================
+
 local MainPlayersTab = PlayersSection:Tab({ Title = "Players", Icon = "solar:users-group-rounded-bold", IconColor = RoseIconColor, Border = true })
 
-local function SetupPlayersButtons()
-	for _, conn in ipairs(SectionConnections) do pcall(function() conn:Disconnect() end) end
-	table.clear(SectionConnections)
-	for _, oldBtn in pairs(PlayerButtonsMap) do pcall(function() oldBtn:Destroy() end) end
-	table.clear(PlayerButtonsMap)
+local function AddPlayerToUI(p)
+	if p == LocalPlayer or PlayerSectionsMap[p] then return end
 	
-	for _, p in ipairs(Players:GetPlayers()) do
-		if p == LocalPlayer then continue end
-		local pSection = MainPlayersTab:Section({ Title = p.Name, TextSize = 14 })
-		StyleSectionBackground(p.Name)
-		
-		pSection:Button({
-			Title = "Teleport to Player",
-			Callback = function()
-				if p.Character and p.Character:FindFirstChild("HumanoidRootPart") and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-					LocalPlayer.Character.HumanoidRootPart.CFrame = p.Character.HumanoidRootPart.CFrame + Vector3.new(0, 3, 0)
-				end
+	local pSection = MainPlayersTab:Section({ Title = p.Name, TextSize = 14 })
+	StyleSectionBackground(p.Name)
+	
+	pSection:Button({
+		Title = "Teleport to Player",
+		Callback = function()
+			if p.Character and p.Character:FindFirstChild("HumanoidRootPart") and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+				LocalPlayer.Character.HumanoidRootPart.CFrame = p.Character.HumanoidRootPart.CFrame + Vector3.new(0, 3, 0)
 			end
-		})
-		
-		pSection:Button({
-			Title = "SkidFling Player",
-			Callback = function()
-				task.spawn(SkidFlingPlayer, p)
-			end
-		})
-		
-		PlayerButtonsMap[p.Name] = pSection
+		end
+	})
+	
+	pSection:Button({
+		Title = "SkidFling Player",
+		Callback = function()
+			task.spawn(SkidFlingPlayer, p)
+		end
+	})
+	
+	PlayerSectionsMap[p] = pSection
+end
+
+local function RemovePlayerFromUI(p)
+	if PlayerSectionsMap[p] then
+		pcall(function() PlayerSectionsMap[p]:Destroy() end)
+		PlayerSectionsMap[p] = nil
 	end
 end
 
-SetupPlayersButtons()
-table.insert(SectionConnections, Players.PlayerAdded:Connect(SetupPlayersButtons))
-table.insert(SectionConnections, Players.PlayerRemoving:Connect(SetupPlayersButtons))
+-- Первоначальное наполнение
+for _, p in ipairs(Players:GetPlayers()) do
+	AddPlayerToUI(p)
+end
 
--- ESP Вкладка
+-- Динамический реальный тайм подписками
+Players.PlayerAdded:Connect(function(p)
+	AddPlayerToUI(p)
+end)
+
+Players.PlayerRemoving:Connect(function(p)
+	RemovePlayerFromUI(p)
+end)
+
+-- Visuals (ESP)
 local VisualsTab = EspSection:Tab({ Title = "Visuals (ESP)", Icon = "solar:eye-bold-duotone", IconColor = RoseIconColor, Border = true })
 VisualsTab:Toggle({ Title = "Esp Sheriff & Hero", Value = false, Callback = function(state) Flags.EspSheriff = UnwrapValue(state) == true end })
 VisualsTab:Toggle({ Title = "Esp Murder", Value = false, Callback = function(state) Flags.EspMurder = UnwrapValue(state) == true end })
 VisualsTab:Toggle({ Title = "Esp Innocent", Value = false, Callback = function(state) Flags.EspInnocent = UnwrapValue(state) == true end })
 VisualsTab:Toggle({ Title = "Esp Gun Drop", Value = false, Callback = function(state) EspGunDropEnabled = UnwrapValue(state) == true end })
 
--- Настройки оптимизации
+-- Performance
 local SettingsTab = SettingsSection:Tab({ Title = "Performance", Icon = "solar:settings-bold", IconColor = RoseIconColor, Border = true })
 SettingsTab:Button({
 	Title = "FPS Booster (Оптимизация)",
@@ -833,10 +838,7 @@ SettingsTab:Button({
 	end
 })
 
--- // =============================================================================
--- // ЛОГИКА НАВЕДЕНИЯ И ХУКОВ МЕТАТАБЛИЦ (SILENT AIM BYPASS)
--- // =============================================================================
-
+-- // SILENT AIM & AIMBOT MECHANICS
 local function GetMurderer()
 	for _, p in ipairs(Players:GetPlayers()) do 
 		if GetPlayerRole(p) == "Murderer" then return p end 
@@ -844,7 +846,6 @@ local function GetMurderer()
 	return nil
 end
 
--- Обработка выстрела с умной компенсацией стрейфов
 local function FireInstantHit()
 	local murderer = GetMurderer()
 	if not murderer or not murderer.Character then return end
@@ -857,31 +858,25 @@ local function FireInstantHit()
 	if targetPart and gun and localHrp and Cam then
 		if not CheckWallVisibility(targetPart) then return end
 		
-		-- Расстояние до цели
 		local distance = (targetPart.Position - localHrp.Position).Magnitude
 		local ping = Stats.Network.ServerGitLimitRoundTripTime:GetValue() or 0.04
 		
-		-- Адаптивный коэффициент: чем ближе цель, тем меньше нужно упреждение
 		local targetVelocity = targetPart.Velocity
 		local speedMod = math.clamp(targetVelocity.Magnitude, 0, 16)
 		
-		-- Умный расчет точки сглаживания при зигзагах
 		local predictedPosition = targetPart.Position
 		if distance > 15 and speedMod > 2 then
 			local offset = targetVelocity.Unit * (speedMod * ping * 0.95)
 			predictedPosition = targetPart.Position + offset
 		end
 		
-		TargetHeadPosition = predictedPosition -- Фиксируем для метатаблиц
+		TargetHeadPosition = predictedPosition
 		
-		-- Мгновенный синхронный разворот в тот же кадр
 		Cam.CFrame = CFrame.lookAt(Cam.CFrame.Position, predictedPosition)
 		localHrp.CFrame = CFrame.new(localHrp.Position, Vector3.new(predictedPosition.X, localHrp.Position.Y, predictedPosition.Z))
 		
-		-- Мгновенная активация
 		gun:Activate()
 		
-		-- Подстраховка прямой репликацией пакета
 		local shootRemote = UpdateShootRemote()
 		local gunHandle = gun:FindFirstChild("Handle") or gun:FindFirstChildWhichIsA("BasePart")
 		if shootRemote and gunHandle then
@@ -890,14 +885,12 @@ local function FireInstantHit()
 			shootRemote:FireServer(originCFrame, targetCFrame)
 		end
 		
-		-- Очистка кэша цели
 		task.delay(0.015, function()
 			TargetHeadPosition = nil
 		end)
 	end
 end
 
--- // ХУКИНГ ДВИЖКА
 local OldIndex = nil
 OldIndex = hookmetamethod(game, "__index", function(self, key)
 	if not checkcaller() then
@@ -932,7 +925,6 @@ OldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
 	return OldNamecall(self, ...)
 end)
 
--- Слушатель нажатий мыши/тапа
 UserInputService.InputBegan:Connect(function(input, processed)
 	if processed then return end 
 	if (AutoAimEnabled or IdealWallbangEnabled) and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
@@ -940,7 +932,6 @@ UserInputService.InputBegan:Connect(function(input, processed)
 	end
 end)
 
--- Слежение камеры в режиме зажима кнопки
 RunService.RenderStepped:Connect(function()
 	if not AutoAimEnabled or not GetEquippedGun() then return end
 	local murderer = GetMurderer()
@@ -956,7 +947,6 @@ RunService.RenderStepped:Connect(function()
 	end
 end)
 
--- Фоновый луп магнита пестов
 task.spawn(function()
 	while true do
 		task.wait(0.3)
