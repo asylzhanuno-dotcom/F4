@@ -462,7 +462,7 @@ WorldTab:Button({
 })
 
 -- // =============================================================================
--- // ВКЛАДКА LOCAL PLAYER (ПЕРЕМЕЩЕНИЕ И ФИЗИКА)
+-- // ВКЛАДКА LOCAL PLAYER (ПЕРЕМЕЩЕНИЕ И ФИЗИКА - FIXED WITH NEW SLIDER SYNTAX)
 -- // =============================================================================
 
 local LocalPlayerTab = PlayersSection:Tab({ Title = "Local Player", Icon = "solar:user-bold", IconColor = RoseIconColor, Border = true })
@@ -474,44 +474,83 @@ local LPVars = {
 	FlySpeed = 50,
 	NoclipEnabled = false,
 	InfJumpEnabled = false,
-	FlyBodyVelocity = nil
+	FlyBodyVelocity = nil,
+	FlyBodyGyro = nil
 }
 
--- WalkSpeed
+-- Функция безопасной очистки физических объектов полета
+local function StopFlying()
+	if LPVars.FlyBodyVelocity then
+		LPVars.FlyBodyVelocity:Destroy()
+		LPVars.FlyBodyVelocity = nil
+	end
+	if LPVars.FlyBodyGyro then
+		LPVars.FlyBodyGyro:Destroy()
+		LPVars.FlyBodyGyro = nil
+	end
+	local char = LocalPlayer.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.PlatformStand = false
+	end
+end
+
+-- WalkSpeed Toggle & Slider
 LocalPlayerTab:Toggle({
 	Title = "Enable WalkSpeed",
 	Value = false,
 	Callback = function(state) 
 		LPVars.SpeedEnabled = UnwrapValue(state) == true 
+		local char = LocalPlayer.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if hum and not LPVars.SpeedEnabled then
+			hum.WalkSpeed = 16 -- Сброс к стандартной скорости при выключении
+		end
 	end
 })
 
 LocalPlayerTab:Slider({
 	Title = "WalkSpeed Amount",
-	Min = 16, Max = 150, Default = 16,
+	IsTooltip = true,
+	Step = 1,
+	Value = {
+		Min = 16,
+		Max = 150,
+		Default = 16,
+	},
 	Callback = function(val) 
 		local num = tonumber(UnwrapValue(val)) or 16
 		LPVars.WalkSpeed = num
+		if LPVars.SpeedEnabled then
+			local char = LocalPlayer.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if hum then hum.WalkSpeed = num end
+		end
 	end
 })
 
--- Fly
+-- Fly Toggle & Slider
 LocalPlayerTab:Toggle({
 	Title = "Enable Fly",
 	Value = false,
 	Callback = function(state) 
 		local enabled = UnwrapValue(state) == true
 		LPVars.FlyEnabled = enabled
-		if not enabled and LPVars.FlyBodyVelocity then
-			LPVars.FlyBodyVelocity:Destroy()
-			LPVars.FlyBodyVelocity = nil
+		if not enabled then
+			StopFlying()
 		end
 	end
 })
 
 LocalPlayerTab:Slider({
 	Title = "Fly Speed",
-	Min = 10, Max = 250, Default = 50,
+	IsTooltip = true,
+	Step = 1,
+	Value = {
+		Min = 10,
+		Max = 250,
+		Default = 50,
+	},
 	Callback = function(val) 
 		local num = tonumber(UnwrapValue(val)) or 50
 		LPVars.FlySpeed = num
@@ -535,19 +574,26 @@ LocalPlayerTab:Toggle({
 	end
 })
 
--- Логика Полета и Скорости
-RunService.Heartbeat:Connect(function()
+-- Исправленный игровой цикл перемещения (без блокировки физики)
+RunService.Heartbeat:Connect(function(deltaTime)
 	local char = LocalPlayer.Character
 	if not char then return end
 	
 	local hum = char:FindFirstChildOfClass("Humanoid")
 	local hrp = char:FindFirstChild("HumanoidRootPart")
-	
-	if LPVars.SpeedEnabled == true and hum and type(LPVars.WalkSpeed) == "number" then
-		hum.WalkSpeed = LPVars.WalkSpeed
+	if not hum or not hrp then return end
+
+	-- Безопасный метод ускорения через CFrame (обходит античит заморозку MM2)
+	if LPVars.SpeedEnabled == true and hum.MoveDirection.Magnitude > 0 then
+		local extraSpeed = (LPVars.WalkSpeed - 16)
+		if extraSpeed > 0 then
+			hrp.CFrame = hrp.CFrame + (hum.MoveDirection * (extraSpeed * deltaTime))
+		end
 	end
 
-	if LPVars.FlyEnabled == true and hrp and type(LPVars.FlySpeed) == "number" then
+	-- Логика полета без залипания BodyVelocity
+	if LPVars.FlyEnabled == true then
+		hum.PlatformStand = true
 		local cam = Workspace.CurrentCamera
 		if cam then
 			local ctrl = {f = 0, b = 0, l = 0, r = 0}
@@ -558,13 +604,24 @@ RunService.Heartbeat:Connect(function()
 			if UserInputService:IsKeyDown(Enum.KeyCode.D) then ctrl.r = 1 end
 			
 			local dir = cam.CFrame.LookVector * (ctrl.f + ctrl.b) + cam.CFrame.RightVector * (ctrl.l + ctrl.r)
-			if dir.Magnitude > 0 then dir = dir.Unit end
 			
 			if not LPVars.FlyBodyVelocity or not LPVars.FlyBodyVelocity.Parent then
-				LPVars.FlyBodyVelocity = Instance.new("BodyVelocity", hrp)
-				LPVars.FlyBodyVelocity.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+				LPVars.FlyBodyVelocity = Instance.new("BodyVelocity")
+				LPVars.FlyBodyVelocity.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+				LPVars.FlyBodyVelocity.Parent = hrp
 			end
-			LPVars.FlyBodyVelocity.Velocity = dir * LPVars.FlySpeed
+			
+			if dir.Magnitude > 0 then
+				dir = dir.Unit
+				LPVars.FlyBodyVelocity.Velocity = dir * LPVars.FlySpeed
+			else
+				-- Когда клавиши не нажаты, обнуляем силу, чтобы не замораживать персонажа
+				LPVars.FlyBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+			end
+		end
+	else
+		if LPVars.FlyBodyVelocity then
+			StopFlying()
 		end
 	end
 end)
